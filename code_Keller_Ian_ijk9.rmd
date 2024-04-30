@@ -1,0 +1,478 @@
+---
+title: "STAT 1361 Final"
+author: "Ian Keller"
+date: "2024-04-13"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Exploratory Data Analysis
+
+Reading in data
+
+```{r}
+train <- read.csv("train.csv", header = TRUE, sep = ",")
+test_final <- read.csv("test.csv", header = TRUE, sep = ",")
+```
+
+Looking at the training set
+
+```{r}
+str(train)
+```
+
+```{r}
+summary(train)
+```
+
+Exploring Data Missing Values
+
+```{r}
+sum(is.na(train))
+```
+
+
+
+Looking for outliers in the data
+
+```{r}
+#Selecting just numeric variables and their respective columns
+library(dplyr)
+library(ggplot2)
+
+numeric_vars <- train %>%
+  select_if(is.numeric)
+num_vars_names <- colnames(numeric_vars)
+
+#plotting all numeric variables in boxplots for outliers
+for (var in num_vars_names) {
+  p = ggplot(train, aes(y = !!sym(var))) +
+    geom_boxplot(fill = "skyblue", color = "black") +
+    labs(title = paste("Boxplot of", var), x = "", y = var) +
+    theme_minimal()
+  print(p)
+}
+```
+
+While these graphs do contain some outliers, these are valid data points that I do not believe need to be treated.Looking at the dependent variable we see no outliers which is a good sign.
+
+**Exploring Normality**
+
+```{r}
+#looping through histogram graphs
+for (var in num_vars_names) {
+  p <- ggplot(train, aes(x = !!sym(var))) +
+    geom_histogram(fill = "skyblue", color = "black") +
+    labs(title = paste("Histogram of", var), x = var, y = "Frequency") +
+    theme_minimal()
+  print(p)
+}
+```
+
+Here, we immediately run into a problem in which the popularity (dependent) variable is high right skewed due to a large amount of data points being = 0. Other variables like time signature and mode may be best treated as binary predictors.
+
+**Looking at the table of different time signatures.**
+
+```{r}
+table(train$time_signature)
+```
+
+While it is tempting to create dummy variables for each distinct time signature, I feel it is best to leave as is due to a large majority belonging to 4 and very little belonging to other categories. Additionally, grouping into categories such as "4" and "other" may be a possibility if we see a large difference in popularity scores.
+
+```{r}
+# Calculate the mean popularity when time_signature = 4
+mean(train$popularity[train$time_signature == 4])
+
+# Calculate the mean popularity when time_signature != 4
+mean(train$popularity[train$time_signature != 4])
+```
+The means do seem fairly different here but let's run a t-test for significance
+```{r}
+# Perform t-test
+t.test(train$popularity[train$time_signature == 4],
+                        train$popularity[train$time_signature != 4])
+```
+Here we can see that the difference between the two different time signatures is significantly different and worth creating a new variable denoting time signature as 4.
+
+Since time_signature is in essence a categorical variable (integer), I believe it is best to make it categorical for ease of interpretibility. Picking the variable at == 4 or not makes the most sense because it has the most data points and has been seen to be significantly different from the other values of time_signature.
+
+```{r}
+#Creating time_sig dummy var
+train$time_sig_4 <- ifelse(train$time_signature == 4, 1, 0)
+```
+
+
+**Let's explore popularity of 0 more. **
+
+```{r}
+sum(train$popularity == 0)
+```
+
+So, 535 of our 1200 data points are equal to 0 popularity. This seems foolish to remove all of these data points due to removing unnecessary noise and it seems possible that our models can actually learn what doesn't create popularity based on this information. Thinking back to our slides on random forest trees it seems that this additional noise may not be a bad thing for that type of model.
+
+**Let's check normality when all 0's are removed. **
+
+```{r}
+#Removing tracks of popularity 0
+pop_0 <- train %>%
+  filter(popularity != 0)
+
+#plotting tracks where popularity doesnt equal 0
+hist(pop_0$popularity, breaks =20, main = "Histogram of Popularities Greater Then Zero", xlab = "Popularity")
+```
+
+Once we remove some of the lower values our plot begins to take a normal shape.
+
+```{r}
+library(corrplot)
+#Creating and visualizing the correlation plot between variables
+corr_matrix <- cor(numeric_vars)
+
+corrplot(corr_matrix, method = "color")
+```
+
+Here we see the mode, danceability, loudness, and duration have some light correlation with popularity. Other features not so much. Other strong correlations between variables are loudness and energy, acousticness and energy, and loudness and acousticness so there seems to be some multicollinearity issues here. Given our smaller p in the dataset, I do not believe we need to make any changes because of this concern. Some models like Lasso and Ridge address this "issue" directly but otherwise shouldn't be too big of a deal.
+
+Lastly, lets see how many variables fall within each genre as this could be important for later.
+
+```{r}
+table(train$track_genre)
+```
+
+The data set is roughly evenly split and this information should be included in our analysis so I will create dummy variables for each group, with jazz being the base group.
+
+```{r}
+#Creating dummy variables
+train$genre_pop <- ifelse(train$track_genre == "pop", 1,0)
+train$genre_rock <- ifelse(train$track_genre == "rock", 1,0)
+#going to dummy var explicit as well
+train$explicit <- ifelse(train$explicit == "TRUE", 1, 0)
+
+#Recreating the numeric_vars variable for analysis
+numeric_vars <- subset(train, select = c(-time_signature, -id))
+numeric_vars <- subset(numeric_vars, select = sapply(numeric_vars, is.numeric))
+```
+
+### Modeling
+####Creating train and test split
+```{r}
+library(caret)
+set.seed(123)
+train_index<- createDataPartition(train$popularity, p = .75, list = FALSE)
+
+X_train <- numeric_vars[train_index, -which(names(numeric_vars) == "popularity")]
+y_train <- numeric_vars$popularity[train_index]
+
+X_test <- numeric_vars[-train_index, -which(names(numeric_vars) == "popularity")]
+y_test <- numeric_vars$popularity[-train_index]
+```
+
+#### Linear Models
+**Full Linear Model **
+```{r}
+#Starting with the full linear model
+full_lm <- lm(y_train ~. , X_train)
+summary(full_lm)
+pred_full_lm <- predict(full_lm, newdata = X_test)
+mse_full_lm <- mean((pred_full_lm - y_test)^2)
+mse_full_lm
+```
+
+
+Model using Forward/Backward Selection, using BIC to penalize for more terms.
+```{r}
+library(MASS)
+#Fitting min and max models
+min_model <- lm(y_train ~ 1, data = X_train)
+max_model <- formula(lm(y_train ~. , X_train))
+
+#Training Forward Selection
+forward_model <- step(min_model, direction = "forward", scope = max_model, k = log(nrow(X_test)))
+#note that "k = log(nrow(numeric_vars)) represents looking at BIC instead of AIC
+```
+Summary Stats of Best Forward Model
+```{r}
+best_forward <- lm(y_train ~ genre_pop + duration_ms + mode + valence + danceability + 
+    energy, data = X_train)
+summary(best_forward)
+#MSE
+pred_forward_lm <- predict(best_forward, newdata = X_test)
+mse_forward_lm <- mean((pred_forward_lm - y_test)^2)
+mse_forward_lm
+```
+
+**Testing Backwards Model**
+```{r}
+backward_model <- step(full_lm, direction = "backward", k = log(nrow(X_test)))
+```
+**Running the Best Backward Model **
+```{r}
+backward_model <- lm(y_train ~ duration_ms + danceability + energy + valence + genre_pop, data = X_train)
+summary(backward_model)
+
+#MSE
+pred_backward_lm <- predict(backward_model, newdata = X_test)
+mse_backward_lm <- mean((pred_backward_lm - y_test)^2)
+mse_backward_lm
+```
+
+**Stepwise Model Selection **
+```{r}
+stepwise_model <- step(min_model, direction = "both", scope = max_model, k = log(nrow(X_test)))
+```
+**Stepwise Stats **
+```{r}
+best_stepwise <- lm(y_train ~ genre_pop + duration_ms + valence + danceability + energy, data = X_train)
+summary(best_stepwise)
+#MSE
+pred_stepwise_lm <- predict(best_stepwise, newdata = X_test)
+mse_stepwise_lm <- mean((pred_stepwise_lm - y_test)^2)
+mse_stepwise_lm
+```
+Here, we have the same exact model as backward selection. Thus far, the backward and stepwise selection model seems to be the best combination of interpretibility and accuracy as they have lower MSE then forward selection. Still, the full model has the lowest MSE.
+
+### Naive Bayes and Lasso Regression
+**Creating new training and validation set for tuning parameter **
+```{r}
+
+set.seed(123)
+# Calculate the number of rows in the dataframe
+total_rows <- nrow(numeric_vars)
+
+# Calculate the number of rows for the training set (75%)
+train_rows <- round(0.75 * total_rows)
+
+# Randomly select row indices for the training set
+train_indices <- sample(1:total_rows, train_rows)
+
+# Create the training set
+train <- numeric_vars[train_indices, ]
+
+# Create the testing set by excluding the training indices
+test <- numeric_vars[-train_indices, ]
+
+```
+
+
+Creating x matrix and y vector
+```{r}
+#assigning variables
+library(glmnet)
+x <- model.matrix(popularity ~., numeric_vars)[, -1]
+y <- numeric_vars$popularity
+```
+Initializing Ridge Model
+```{r}
+grid <- 10^seq(10, -2, length = 100)
+ridge.mod <- glmnet(x,y, alpha = 0, lambda = grid)
+```
+
+splitting data into train and test (validation) split
+```{r}
+set.seed(123)
+train1 <- sample(1:nrow(x), nrow(x) * .75)
+test <- (-train1)
+y.test <- y[test]
+```
+
+```{r}
+set.seed(123)
+
+#Building the ridge model via cross validation
+cv.out <- cv.glmnet(x[train1, ], y[train1], alpha = 0)
+plot(cv.out)
+
+#Finding best lambda value
+bestlam <- cv.out$lambda.min
+bestlam
+```
+Calculating test error
+```{r}
+ridge_pred <- predict(ridge.mod, s = bestlam, newx = x[test, ])
+
+mean((ridge_pred - y.test)^2)
+```
+Looking at model coefficients
+```{r}
+out <- glmnet(x,y, alpha =0, lambda = grid)
+ridge.coef <- predict(out, type = "coefficients", s = bestlam)[1:17, ]
+ridge.coef
+```
+
+
+
+
+
+####Lasso Regression
+```{r}
+lasso.mod <- glmnet(x[train1, ], y[train1], alpha = 1, lambda = grid)
+cv_lasso <- cv.glmnet(x[train1, ], y[train1], alpha = 1, lambda = grid)
+plot(cv_lasso)
+#Finding best lambda
+bestlam_2 <- cv_lasso$lambda.min
+print(bestlam_2)
+```
+Creating the optimal lasso model
+```{r}
+lasso.pred <- predict(lasso.mod, s = bestlam_2, newx = x[test, ])
+mean((lasso.pred - y.test)^2)
+```
+Looking at lasso coefficients
+```{r}
+out_lasso <- glmnet(x,y, alpha =1, lambda = grid)
+lasso.coef <- predict(out_lasso, type = "coefficients", s = bestlam_2)[1:17, ]
+lasso.coef
+```
+The ridge model performed the best out of all the models so far with lasso in close second. As far as interpretibility goes we see that lasso does some dimension reduction as 5 of our variables turn to zero in this model which can help our understanding of whats truly important.
+
+### Tree Models
+```{r}
+library(tree)
+
+tree_model <- tree(y_train ~ ., data = X_train)
+summary(tree_model)
+```
+Visualizing the Tree
+```{r}
+plot(tree_model)
+text(tree_model, pretty = 0, cex = 0.5)
+```
+**Tree Model Predictions **
+```{r}
+tree1_predict <- predict(tree_model, newdata = X_test)
+
+
+mean((y_test - tree1_predict)^2)
+```
+So far this is are lowest MSE and we have a fairly interpretable model as well.
+
+**Pruning **
+```{r}
+cv_tree_model <- cv.tree(tree_model)
+plot(cv_tree_model$size, cv_tree_model$dev, type = "b")
+```
+Pruned Tree Model
+```{r}
+prune_model <- prune.tree(tree_model, best = 10)
+summary(prune_model)
+plot(prune_model)
+text(prune_model, pretty = 0, cex = 0.65)
+```
+Making Predictions on Prune Model
+```{r}
+prune_predict <- predict(prune_model, newdata = X_test)
+mean((prune_predict - y_test)^2)
+```
+Performs slightly worse then our first tree as it creates a simplified model.
+
+
+**Bagging **
+```{r}
+library(randomForest)
+set.seed(123)
+
+bag_model <- randomForest(y_train ~. ,data = X_train, mtry =16, importance = TRUE)
+bag_model
+```
+Bagging Performance on Test Set
+```{r}
+yhat_bag <- predict(bag_model, newdata = X_test)
+mean((yhat_bag - y_test)^2)
+```
+Here we by far have the lowest MSE of any model thus far. Let's see its interpretation
+```{r}
+importance(bag_model)
+varImpPlot(bag_model)
+```
+
+
+**Building Random Forest Model **
+```{r}
+set.seed(123)
+#Building RF model, mtry =6 from p/3 or 16/3 and rounding up.
+rf_model <- randomForest(y_train ~ ., data = X_train, mtry= 6, importance =TRUE)
+rf_model
+```
+Test Set MSE
+```{r}
+yhat_rf <- predict(rf_model, newdata = X_test)
+mean((yhat_rf - y_test)^2)
+sqrt(mean((yhat_rf - y_test)^2))
+```
+This edges our bagging model slightly. Let's look at importance
+```{r}
+importance(rf_model)
+varImpPlot(rf_model)
+```
+**Boosting Model **
+```{r}
+library(gbm)
+
+set.seed(123)
+
+boost_model <- gbm(y_train ~., data = X_train, distribution = "gaussian", n.trees = 5000, interaction.depth = 4)
+
+summary(boost_model)
+```
+Boosted MSE
+```{r}
+boost_yhat <- predict(boost_model, newdata = X_test)
+mean((boost_yhat - y_test)^2)
+```
+This did not outperform RF
+
+**BART **
+```{r}
+library(BART)
+set.seed(123)
+
+bartfit <- gbart(X_train, y_train, x.test = X_test)
+```
+**Test Error **
+```{r}
+yhat_bart <- bartfit$yhat.test.mean
+mean((y_test - yhat_bart)^2)
+```
+
+Here, we can conclude that Random Forest was our best performing model.
+
+### Fitting Best (Random Forest) Model to Test Set
+**Setting Up Test Set **
+```{r}
+#reading in test data
+test_set <- read.table("test.csv", header = TRUE, sep = ",")
+#variable creation for genres
+test_set$genre_pop <- ifelse(test_set$track_genre == "pop", 1,0)
+test_set$genre_rock <- ifelse(test_set$track_genre == "rock", 1,0)
+
+#creating time_sig var
+test_set$time_sig_4 <- ifelse(test_set$time_signature == 4, 1, 0)
+```
+
+
+```{r}
+test_set$popularity <- predict(rf_model, newdata = test_set)
+```
+Subsetting the dataframe and saving it
+```{r}
+test_set_final <- test_set[, c("id", "popularity")]
+
+#exporting csv
+write.csv(test_set_final, file = "C:/Users/Ian Keller/Desktop/School/2023-2024/Spring Semester/Statistical Learning and Data Science/Final/testing_predictions_KELLER_IAN_4356656.csv", row.names = FALSE)
+```
+
+Reading in original train file
+```{r}
+train_original <- read.csv("train.csv", header = TRUE, sep = ",")
+```
+Plotting Duration vs Popularity for non technical suggestion.
+```{r}
+plot(train$duration_ms, train$popularity)
+```
+
+
+
+
